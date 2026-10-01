@@ -46,6 +46,8 @@ from rl_games.common.vecenv import IVecEnv
 
 from isaaclab.envs import VecEnvObs
 
+from ..utils.autoreset import _check_autoreset_mode
+
 if TYPE_CHECKING:
     from isaaclab.envs import (
         DirectRLEnv,
@@ -140,6 +142,8 @@ class RlGamesVecEnvWrapper(IVecEnv):
                 " ManagerBasedRLEnvWarp. Environment type:"
                 f" {type(env)}"
             )
+        _check_autoreset_mode(env)
+
         # initialize the wrapper
         self.env = env
         # store provided arguments

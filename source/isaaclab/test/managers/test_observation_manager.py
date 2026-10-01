@@ -16,7 +16,8 @@ simulation_app = AppLauncher(headless=True).app
 """Rest everything follows."""
 
 from collections import namedtuple
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import torch
@@ -29,7 +30,7 @@ from isaaclab.managers import (
     ObservationTermCfg,
     RewardTermCfg,
 )
-from isaaclab.utils import configclass, modifiers
+from isaaclab.utils import configclass, modifiers, noise
 
 pytestmark = pytest.mark.integration
 
@@ -796,3 +797,128 @@ def test_concatenate_dim(setup_env):
 
     # For critic_neg_dim: check that it is the same as critic
     torch.testing.assert_close(obs_critic_neg_dim, obs_critic)
+
+
+def dummy_observation(env: DummyEnv) -> torch.Tensor:
+    """Return the dummy environment observation."""
+    return env.observation
+
+
+class DummyEnv:
+    """Minimal environment double used by :class:`ObservationManager`."""
+
+    def __init__(self, num_envs: int = 2) -> None:
+        self.num_envs = num_envs
+        self.device = "cpu"
+        self.sim = SimpleNamespace(is_playing=lambda: True)
+        self.observation = torch.arange(num_envs, dtype=torch.float32).unsqueeze(-1)
+
+
+@configclass
+class HistoryObservationsCfg:
+    """Observation configuration with group-level history."""
+
+    @configclass
+    class PolicyCfg(ObservationGroupCfg):
+        """Policy observation group configuration."""
+
+        dummy: ObservationTermCfg = ObservationTermCfg(func=dummy_observation)
+
+        def __post_init__(self):
+            self.history_length = 5
+
+    policy: PolicyCfg = PolicyCfg()
+
+
+@pytest.mark.parametrize("concatenate_terms", [False, True])
+def test_partial_refresh_preserves_continuing_observations(concatenate_terms):
+    """Reset observations replace selected rows without advancing another episode's history."""
+    cfg = HistoryObservationsCfg()
+    cfg.policy.history_length = 2
+    cfg.policy.concatenate_terms = concatenate_terms
+    env = DummyEnv(num_envs=3)
+    env.observation = torch.tensor([[0.0], [10.0], [20.0]])
+    manager = ObservationManager(cfg, cast("ManagerBasedEnv", env))
+
+    def history(output):
+        return output["policy"] if concatenate_terms else output["policy"]["dummy"]
+
+    for _ in range(3):
+        before_reset = manager.compute(update_history=True)
+        env.observation += 1
+    expected_before_reset = torch.tensor([[1.0, 2.0], [11.0, 12.0], [21.0, 22.0]])
+    torch.testing.assert_close(history(before_reset), expected_before_reset)
+    selected_env_ids = torch.tensor([2, 0])
+    manager.reset(selected_env_ids)
+    env.observation = torch.tensor([[100.0], [999.0], [200.0]])
+    after_reset = manager.compute(update_history=True, env_ids=selected_env_ids)
+    torch.testing.assert_close(history(after_reset), torch.tensor([[100.0, 100.0], [11.0, 12.0], [200.0, 200.0]]))
+    torch.testing.assert_close(history(before_reset), expected_before_reset)
+    env.observation = torch.tensor([[101.0], [13.0], [201.0]])
+    manager.compute(update_history=True)
+    env.observation += 1
+    torch.testing.assert_close(
+        history(manager.compute(update_history=True)),
+        torch.tensor([[101.0, 102.0], [13.0, 14.0], [201.0, 202.0]]),
+    )
+
+
+def test_first_partial_refresh_leaves_other_observations_unused():
+    """A partial initial reset does not initialize histories for environments without episodes."""
+    cfg = HistoryObservationsCfg()
+    cfg.policy.history_length = 2
+    env = DummyEnv(num_envs=3)
+    env.observation += 10
+    manager = ObservationManager(cfg, cast("ManagerBasedEnv", env))
+    first = manager.compute(update_history=True, env_ids=slice(1, 3, 2))["policy"]
+    torch.testing.assert_close(first, torch.tensor([[0.0, 0.0], [11.0, 11.0], [0.0, 0.0]]))
+    env.observation += 10
+    result = manager.compute(update_history=True)["policy"]
+    torch.testing.assert_close(result, torch.tensor([[20.0, 20.0], [11.0, 21.0], [22.0, 22.0]]))
+
+
+@pytest.mark.parametrize("callback_kind", ["term", "modifier", "noise"])
+def test_partial_refresh_rejects_stateful_callbacks(callback_kind):
+    """Unsupported callbacks fail before a partial refresh can advance their full-batch state."""
+    cfg = HistoryObservationsCfg()
+    cfg.policy.history_length = 0
+    if callback_kind == "term":
+        cfg.policy.dummy = ObservationTermCfg(func=complex_function_class, params={"interval": 1.0})
+    elif callback_kind == "modifier":
+        cfg.policy.dummy.modifiers = [modifiers.IntegratorCfg(dt=1.0)]
+    else:
+        cfg.policy.enable_corruption = True
+        cfg.policy.dummy.noise = noise.NoiseModelCfg(noise_cfg=noise.ConstantNoiseCfg(bias=1.0))
+    env = DummyEnv()
+    manager = ObservationManager(cfg, cast("ManagerBasedEnv", env))
+    manager.validate_partial_update_support(None)
+    manager.validate_partial_update_support(slice(None))
+    manager.validate_partial_update_support(torch.tensor([1, 0]))
+    manager.compute(update_history=True)
+    with pytest.raises(ValueError, match="partial observation updates"):
+        manager.validate_partial_update_support([0])
+    with pytest.raises(ValueError, match="partial observation updates"):
+        manager.compute(update_history=True, env_ids=[0])
+    result = manager.compute()["policy"]
+    if callback_kind == "term":
+        torch.testing.assert_close(result, torch.full((2, 1), 2.0))
+    elif callback_kind == "modifier":
+        torch.testing.assert_close(result, torch.tensor([[0.0], [1.5]]))
+    else:
+        torch.testing.assert_close(result, torch.tensor([[1.0], [2.0]]))
+
+
+def test_partial_group_refresh_preserves_latest_full_group_result():
+    """A direct group computation refreshes the cache without changing earlier observation mappings."""
+    cfg = HistoryObservationsCfg()
+    cfg.policy.history_length = 0
+    env = DummyEnv(num_envs=3)
+    manager = ObservationManager(cfg, cast("ManagerBasedEnv", env))
+    first_observations = manager.compute()
+    env.observation += 10
+    full_group = manager.compute_group("policy")
+    env.observation += 100
+    partial_group = manager.compute_group("policy", env_ids=[1])
+    torch.testing.assert_close(partial_group, torch.tensor([[10.0], [111.0], [12.0]]))
+    torch.testing.assert_close(full_group, torch.tensor([[10.0], [11.0], [12.0]]))
+    torch.testing.assert_close(first_observations["policy"], torch.tensor([[0.0], [1.0], [2.0]]))

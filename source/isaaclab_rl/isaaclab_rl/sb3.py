@@ -30,6 +30,8 @@ from stable_baselines3.common.preprocessing import is_image_space, is_image_spac
 from stable_baselines3.common.utils import constant_fn
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvObs, VecEnvStepReturn
 
+from .utils.autoreset import _check_autoreset_mode
+
 if TYPE_CHECKING:
     from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
 
@@ -172,6 +174,8 @@ class Sb3VecEnvWrapper(VecEnv):
                 " ManagerBasedRLEnvWarp. Environment type:"
                 f" {type(env)}"
             )
+        _check_autoreset_mode(env)
+
         # initialize the wrapper
         self.env = env
         self.fast_variant = fast_variant

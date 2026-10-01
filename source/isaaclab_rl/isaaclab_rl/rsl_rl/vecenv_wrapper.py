@@ -12,6 +12,8 @@ import torch
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
 
+from ..utils.autoreset import _check_autoreset_mode
+
 if TYPE_CHECKING:
     from isaaclab.envs import (
         DirectRLEnv,
@@ -72,6 +74,8 @@ class RslRlVecEnvWrapper(VecEnv):
                 " ManagerBasedRLEnvWarp. Environment type:"
                 f" {type(env)}"
             )
+
+        _check_autoreset_mode(env)
 
         # initialize the wrapper
         self.env = env

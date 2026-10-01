@@ -30,6 +30,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal
 
+from .utils.autoreset import _check_autoreset_mode
+
 if TYPE_CHECKING:
     from isaaclab.envs import (
         DirectMARLEnv,
@@ -115,6 +117,8 @@ def SkrlVecEnvWrapper(
         )
 
     # import statements according to the ML framework
+    _check_autoreset_mode(env)
+
     if ml_framework.startswith("torch"):
         from skrl.envs.wrappers.torch import wrap_env
     elif ml_framework.startswith("jax"):

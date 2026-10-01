@@ -91,7 +91,7 @@ def test_step_updates_observation_history(device):
     # create a new stage
     sim_utils.create_new_stage()
     # create environment with history length of 5
-    env = ManagerBasedEnv(cfg=make_empty_manager_based_env_with_history_cfg(device=device))
+    env = ManagerBasedEnv(cfg=make_empty_manager_based_env_with_history_cfg(device=device, num_envs=3))
     history = env.observation_manager._group_obs_term_history_buffer["empty_observation"]["dummy_term"]
 
     torch.testing.assert_close(
@@ -105,5 +105,11 @@ def test_step_updates_observation_history(device):
         history.current_length,
         torch.ones((env.num_envs,), device=device, dtype=torch.int64),
     )
+
+    before_reset = env.obs_buf["empty_observation"].clone()
+    env.reset(env_ids=torch.tensor([1], device=device))
+    torch.testing.assert_close(env.obs_buf["empty_observation"][[0, 2]], before_reset[[0, 2]])
+    env.step(torch.randn_like(env.action_manager.action))
+    torch.testing.assert_close(history.current_length, torch.full((3,), 2, device=device, dtype=torch.int64))
 
     env.close()
